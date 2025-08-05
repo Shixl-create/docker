@@ -1,0 +1,98 @@
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.yaml.snakeyaml.Yaml;
+
+import java.io.InputStream;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+@Service
+public class YamlProcessorService {
+
+    @Autowired
+    private YamlMessageMapper yamlMessageMapper;
+
+    public void processYamlFile(InputStream yamlInputStream, Long userId) {
+        Yaml yaml = new Yaml();
+        Map<String, Object> yamlData = yaml.load(yamlInputStream);
+
+        Map<String, Object> paths = (Map<String, Object>) yamlData.get("paths");
+        Map<String, Object> definitions = (Map<String, Object>) yamlData.get("definitions");
+
+        for (Map.Entry<String, Object> pathEntry : paths.entrySet()) {
+            String url = pathEntry.getKey();
+            Map<String, Object> methods = (Map<String, Object>) pathEntry.getValue();
+
+            for (Map.Entry<String, Object> methodEntry : methods.entrySet()) {
+                String method = methodEntry.getKey();
+                Map<String, Object> content = (Map<String, Object>) methodEntry.getValue();
+
+                // 提取参数与响应中 $ref 的引用
+                String text = content.toString();
+                Set<String> refs = extractRefs(text);
+
+                Map<String, Object> collectedDefs = new LinkedHashMap<>();
+                Set<String> visited = new HashSet<>();
+
+                Queue<String> toVisit = new LinkedList<>(refs);
+                while (!toVisit.isEmpty()) {
+                    String defKey = toVisit.poll();
+                    if (!visited.contains(defKey) && definitions.containsKey(defKey)) {
+                        visited.add(defKey);
+                        Object def = definitions.get(defKey);
+                        collectedDefs.put(defKey, def);
+
+                        Set<String> innerRefs = extractRefs(def.toString());
+                        toVisit.addAll(innerRefs);
+                    }
+                }
+
+                // 存入数据库
+                YamlMessage message = new YamlMessage();
+                message.setQuestion("Auto generated from YAML");
+                message.setUrl(url);
+                message.setMethod(method.toUpperCase());
+                message.setParameters(collectedDefs.toString());
+                message.setCreatedTime(LocalDateTime.now());
+                message.setEditedTime(LocalDateTime.now());
+                message.setCreatorId(userId);
+                message.setEditorId(userId);
+
+                yamlMessageMapper.insert(message);
+            }
+        }
+    }
+
+    private Set<String> extractRefs(String text) {
+        Set<String> result = new HashSet<>();
+        Pattern pattern = Pattern.compile("'?\\$ref'?: '?#/definitions/(\\w+)'?");
+        Matcher matcher = pattern.matcher(text);
+        while (matcher.find()) {
+            result.add(matcher.group(1));
+        }
+        return result;
+    }
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.IOException;
+
+@RestController
+@RequestMapping("/yaml")
+public class YamlUploadController {
+
+    @Autowired
+    private YamlProcessorService yamlProcessorService;
+
+    @PostMapping("/upload")
+    public String uploadYaml(@RequestParam("file") MultipartFile file,
+                             @RequestParam("userId") Long userId) throws IOException {
+        yamlProcessorService.processYamlFile(file.getInputStream(), userId);
+        return "YAML processed and saved successfully";
+    }
+}
